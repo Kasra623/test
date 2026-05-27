@@ -24,19 +24,66 @@ if [[ -z "$CODESPACE_NAME" ]]; then
 fi
 
 INTERNAL_PORT=8080
-WS_PATH="/$(cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-' | head -c 12)"
+UUID_FILE="$HOME/.xray-cs-uuid"
+WS_PATH_FILE="$HOME/.xray-cs-wspath"
 
 # ── Install Xray-core ────────────────────────────────────────
 log "Installing Xray-core..."
-bash <(curl -Ls https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh) \
-    -- install 2>&1 | tail -5
+XRAY_BIN="$HOME/.local/bin/xray"
+mkdir -p "$HOME/.local/bin"
 
-XRAY_BIN=$(command -v xray || echo /usr/local/bin/xray)
-[[ ! -x "$XRAY_BIN" ]] && err "Xray binary not found after install."
+# Try system install with sudo first, fall back to local binary install
+# Detect arch for fallback
+ARCH=$(uname -m)
+case "$ARCH" in
+    x86_64)  XRAY_ARCH="64" ;;
+    aarch64) XRAY_ARCH="arm64-v8a" ;;
+    *)        err "Unsupported architecture: $ARCH" ;;
+esac
 
-# ── Generate UUID ────────────────────────────────────────────
-UUID=$("$XRAY_BIN" uuid)
-log "UUID generated: $UUID"
+# Try sudo system install first
+log "Trying sudo install..."
+curl -Ls https://raw.githubusercontent.com/XTLS/Xray-install/main/install-release.sh -o /tmp/xray-install.sh
+chmod +x /tmp/xray-install.sh
+if sudo bash /tmp/xray-install.sh 2>&1 | tail -5; then
+    XRAY_BIN=$(command -v xray 2>/dev/null || echo "")
+    # Also check common paths
+    for p in /usr/local/bin/xray /usr/bin/xray; do
+        [[ -x "$p" ]] && XRAY_BIN="$p" && break
+    done
+fi
+
+# Fall back to direct binary download if sudo install didn't produce a working binary
+if [[ -z "$XRAY_BIN" || ! -x "$XRAY_BIN" ]]; then
+    warn "System install failed or binary missing — falling back to direct download..."
+    XRAY_VER=$(curl -sL https://api.github.com/repos/XTLS/Xray-core/releases/latest \
+        | grep '"tag_name"' | head -1 | cut -d'"' -f4)
+    XRAY_URL="https://github.com/XTLS/Xray-core/releases/download/${XRAY_VER}/Xray-linux-${XRAY_ARCH}.zip"
+    log "Downloading Xray ${XRAY_VER} for linux-${XRAY_ARCH}..."
+    curl -Ls "$XRAY_URL" -o /tmp/xray.zip
+    unzip -o /tmp/xray.zip xray -d "$HOME/.local/bin/" 2>/dev/null
+    XRAY_BIN="$HOME/.local/bin/xray"
+    chmod +x "$XRAY_BIN"
+    log "Xray binary installed locally at $XRAY_BIN"
+fi
+
+[[ ! -x "$XRAY_BIN" ]] && err "Xray binary not found after all install attempts."
+log "Using Xray at: $XRAY_BIN"
+
+# ── Generate or reuse UUID + WS_PATH ───────────────────────
+if [[ -f "$UUID_FILE" && -f "$WS_PATH_FILE" ]]; then
+    UUID=$(cat "$UUID_FILE")
+    WS_PATH=$(cat "$WS_PATH_FILE")
+    log "Reusing saved UUID: $UUID"
+    log "Reusing saved WS path: $WS_PATH"
+else
+    UUID=$("$XRAY_BIN" uuid)
+    WS_PATH="/$(cat /proc/sys/kernel/random/uuid 2>/dev/null | tr -d '-' | head -c 12)"
+    echo "$UUID" > "$UUID_FILE"
+    echo "$WS_PATH" > "$WS_PATH_FILE"
+    log "New UUID saved: $UUID"
+    log "New WS path saved: $WS_PATH"
+fi
 
 # ── Write Xray config ────────────────────────────────────────
 CONFIG_PATH="$HOME/.xray-cs-config.json"
